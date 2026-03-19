@@ -1,0 +1,139 @@
+version: "3.9"
+
+# ── Inferix — Docker Compose ─────────────────────────────────
+# Deploy via: docker compose up -d
+#
+# Before starting:
+# 1. Create project folder and upload code
+# 2. Run: docker compose up -d
+# ──────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Coordination Layer ─────────────────────────────────────
+  coordination:
+    image: python:3.9-slim
+    container_name: inferix-coordination
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=true
+      - SECRET_KEY=change-me-in-production
+      - DATABASE_URL=postgresql://ceuser:cepass@postgres:5432/inferix
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: >
+      sh -c "pip install -r coordination/requirements.txt --quiet &&
+             uvicorn coordination.main:app --host 0.0.0.0 --port 8000 --reload"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - inferix-network
+
+  # ── Inference Cluster Stub ─────────────────────────────────
+  inference:
+    image: python:3.9-slim
+    container_name: inferix-inference
+    ports:
+      - "8001:8001"
+    environment:
+      - DEBUG=true
+      - COORDINATION_URL=http://coordination:8000
+      - REDIS_URL=redis://redis:6379/1
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: >
+      sh -c "pip install -r coordination/requirements.txt --quiet &&
+             uvicorn inference.main:app --host 0.0.0.0 --port 8001 --reload"
+    depends_on:
+      - coordination
+      - redis
+    restart: unless-stopped
+    networks:
+      - inferix-network
+
+  # ── PostgreSQL ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: inferix-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=ceuser
+      - POSTGRES_PASSWORD=cepass
+      - POSTGRES_DB=inferix
+    volumes:
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - inferix-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ceuser -d inferix"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - inferix-network
+
+  # ── Redis ──────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: inferix-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - inferix-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - inferix-network
+
+  # ── pgAdmin (Database browser) ─────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: inferix-pgadmin
+    ports:
+      - "5050:80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@inferix.dev
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    volumes:
+      - inferix-pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - inferix-network
+
+  # ── Redis Commander (Redis browser) ───────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: inferix-redis-commander
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - inferix-network
+
+volumes:
+  inferix-postgres-data:
+  inferix-redis-data:
+  inferix-pgadmin-data:
+
+networks:
+  inferix-network:
+    driver: bridge
